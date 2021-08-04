@@ -11,9 +11,8 @@
 
 
 ;; to-do
-;; - compute and display flight category from taf
 ;; - finish more metar wx codes
-;; - compute day from ephemerides
+;; - compute day/night from ephemerides
 
 
 ;; Customization variables ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -191,36 +190,6 @@ parses its XML and returns its DOM"
    ;; (princ (format "DBG: Sky cover list %s" covers))
   )
 
-(defun process_sky_cover (conds is_day)
-  "Determine the worst-coverage layer and generate a symbol accordingly"
-  (setq covers '())
-  (dolist (c conds)
-    (dolist (layer (car (cdr c)))
-      (when (string= (car layer) "sky_cover")
-        (add-to-list 'covers (cdr layer)) ) ) )
-  ;; (princ (format "DBG: Sky cover list %s" covers))
-
-  (setq worst ;; worst sky coverage
-        (catch 'loop
-          (dolist (c '("OVC" "BKN" "SCT" "FEW" "CLR" "SKC"))
-            (when (member c covers) (throw 'loop c)))))
-
-  (if is_day
-      (cond ( (string= worst "OVC")  ( all-the-icons-wicon "cloudy"))
-            ( (string= worst "BKN")  ( all-the-icons-wicon "day-cloudy"))
-            ( (string= worst "SCT")  ( all-the-icons-wicon "day-cloudy-high"))
-            ( t                      ( all-the-icons-wicon "day-sunny"))
-            )
-    ;; else it's night
-    (cond ( (string= worst "OVC")  ( all-the-icons-wicon "cloudy"))
-          ( (string= worst "BKN")  ( all-the-icons-wicon "night-alt-cloudy"))
-          ( (string= worst "SCT")  ( all-the-icons-wicon "night-alt-partly-cloudy"))
-          ( t                      ( all-the-icons-wicon "night-clear"))
-          ) )
-   ;; (princ (format "DBG: Sky cover list %s" covers))
-  )
-
-
 
 (defun wx/fake_raw_sky_condition (conds)
   (setq result "")
@@ -260,6 +229,12 @@ parses its XML and returns its DOM"
   (cons cig_coverage cig_altitude)
   )
   
+(defun wx/determine_flight_category (vis_sm ceiling_ft)
+  (if     (or (< vis_sm 1) (< ceiling_ft 500))  "LIFR"
+    (if   (or (< vis_sm 3) (< ceiling_ft 1000)) "IFR"
+      (if (or (< vis_sm 5) (< ceiling_ft 3000)) "MVFR"
+        "VFR"
+        ))))
 
 
 (defun wx/format_taf_forecast (f station)
@@ -287,7 +262,7 @@ parses its XML and returns its DOM"
                   "" ;; humidity
                   "" ;; pressure
                   (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
-                  "??VFR"
+                  (wx/determine_flight_category visibility_sm (if cig_altitude cig_altitude 10000))
                   (format "%2.0f SM" visibility_sm)
                   (if cig_coverage (format "%s %4.1fk ft" cig_coverage (/ cig_altitude 1000.0)) "None" )
                   (format "day=%s %s %s" is_day wx_string (wx/fake_raw_sky_condition sky_conditions ))
@@ -473,12 +448,7 @@ parses its XML and returns its DOM"
   (switch-to-buffer wx/buf)
   )
 
-
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-
-
 
 (wx)
 
