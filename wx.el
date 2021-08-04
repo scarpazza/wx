@@ -126,14 +126,14 @@ parses its XML and returns its DOM"
        '( "tornado"      ("FC" "+FC" )  )
        '( "fog"          ("BR" "FG" "MIFG" "BCFG" "PRFG" )  )
        '( "day-haze"     ("HZ")  )
-       '( "sprinkle"     ("-RA" "-DZ" "DZ" "+DZ") )
+       '( "sprinkle"     ("-RA" "-DZ" "DZ" "+DZ" ) )
        '( "sleet"        ("FZRA" "FZDZ" "RASN") )
        '( "smoke"        ("FU") )
        '( "dust"         ("DS""PO" "DU" "VA" "SS" "BLDU" "BLSA") )
        '( "hail"         ("GS" "GR" "SP") )
        '( "snow"         ("SN"  "PL"  "SG") )
        '( "snow-wind"    ("BLSN") )
-       '( "showers"      ("RA" "+RA") )
+       '( "showers"      ("RA" "+RA" "VCSH" "SHRA") )
        '( "thunderstorm"          ("VCTS" "TSRA") )
        '( "day-snow-thunderstorm" ("TSSN" "TSSNGS") )
        )
@@ -196,6 +196,80 @@ parses its XML and returns its DOM"
 
 
 
+
+
+(defun wx/format_taf_forecast (f station)
+  "Returns a tabulated entry representing one TAF forecast"
+  (let* (
+         (raw_time       (nth 2 (car (dom-by-tag f 'fcst_time_from))))
+         (time8601       (utc_to_local (iso8601-parse  raw_time)) )         
+         (wind_block     (dom-by-tag f 'wind_speed_kt))
+         (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
+         (wx_string      (nth 2 (car (dom-by-tag f 'wx_string))))
+         (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag f 'visibility_statute_mi)))))
+         (is_day         (and (>= (decoded-time-hour time8601) 6)
+                              (<= (decoded-time-hour time8601) 17))) )        
+    (list time8601
+          (vector station
+                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) ) 
+                  "->"
+                  (wx/process_present_weather wx_string)
+                  "" ;; temperature
+                  "" ;; humidity
+                  "" ;; pressure
+                  (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
+                  "??VFR"
+                  (format "%2.0f SM" visibility_sm) 
+                  (format "day=%s WX=%s " is_day wx_string))
+          )
+    )
+  )
+
+
+
+(defun wx/format_metar (m)
+  "Returns a tabulated entry representing one METAR observation"
+  (let* (
+         (station        (nth 2 (car (dom-by-tag m 'station_id))))
+         (tempC          (string-to-number (nth 2 (car (dom-by-tag m 'temp_c)))))
+         (dewpC          (string-to-number (nth 2 (car (dom-by-tag m 'dewpoint_c)))))
+         (rh             (wx/rel_humidity tempC dewpC))
+         (raw_time       (nth 2 (car (dom-by-tag m 'observation_time))))
+         (time8601       (utc_to_local (iso8601-parse  raw_time)) )
+         (raw            (nth 2 (car (dom-by-tag m 'raw_text))))
+         (wx_string      (nth 2 (car (dom-by-tag m 'wx_string))))
+         (metar_type     (nth 2 (car (dom-by-tag m 'metar_type))))
+         (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag m 'visibility_statute_mi)))))
+         (flight_category (nth 2 (car (dom-by-tag m 'flight_category))))
+         (sky_conditions (dom-by-tag m 'sky_condition))
+         (p_mbar         (nth 2 (car (dom-by-tag m 'sea_level_pressure_mb))))
+         (is_day         (and (>= (decoded-time-hour time8601) 6)
+                                  (<= (decoded-time-hour time8601) 17)))
+         (wind_block     (dom-by-tag m 'wind_speed_kt))
+         (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
+         )
+        
+    (list time8601
+          (vector station
+                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) )
+                  (if (string= metar_type "SPECI")
+                      (all-the-icons-octicon "alert");;"!"
+                    " ")
+                  (concat (wx/process_present_weather wx_string)
+                          (process_sky_cover sky_conditions is_day))
+                  (format "%.0f°C" tempC)
+                  (format "%.0f%%"  rh)
+                  (if p_mbar (format "%4.0f mbar" (string-to-number p_mbar)) "N/A")
+                  (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
+                  flight_category
+                  (format "%2.0f SM" visibility_sm) 
+                  (format "day=%s %s " is_day raw))
+          )
+    )
+  )
+
+
+
 (defun wx/refresh-contents (&optional _arg _noconfirm)
   ;;(wx/ensure-wx-mode)
   (setq tabulated-list-entries '())
@@ -227,80 +301,12 @@ parses its XML and returns its DOM"
             
   (setq station           (nth 2 (car (dom-by-tag wx/firsttaf  'station_id))))
   (setq wx/tafs/forecasts (dom-by-tag wx/firsttaf 'forecast))
-  (dolist (m wx/tafs/forecasts)
-    (let* (
-           (raw_time       (nth 2 (car (dom-by-tag m 'fcst_time_from))))
-           (time8601       (utc_to_local (iso8601-parse  raw_time)) )         
-           (wind_block     (dom-by-tag m 'wind_speed_kt))
-           (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
-           (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag m 'visibility_statute_mi)))))
-           (is_day         (and (>= (decoded-time-hour time8601) 6)
-                              (<= (decoded-time-hour time8601) 17)))
-           
-           )        
-        (setq entry (list time8601
-                     ;(format "%s-%s" station time8601)
-                          (vector station
-                                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) ) 
-                                "Fcast"
-                                "WX"
-                                "" ;; temperature
-                                "" ;; humidity
-                                "" ;; pressure
-                                (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
-                                "??VFR"
-                                (format "%2.0f SM" visibility_sm) 
-                                (format "day=%s  " is_day))
-                          )
-              )
-        (print entry)
-        (add-to-list 'tabulated-list-entries entry)
-        )
-  )
+  (dolist (f wx/tafs/forecasts)
+    (add-to-list 'tabulated-list-entries (wx/format_taf_forecast f station) ) )
   
   (dolist (m wx/metars)
-      (let* (
-             (station        (nth 2 (car (dom-by-tag m 'station_id))))
-             (tempC          (string-to-number (nth 2 (car (dom-by-tag m 'temp_c)))))
-             (dewpC          (string-to-number (nth 2 (car (dom-by-tag m 'dewpoint_c)))))
-             (rh             (wx/rel_humidity tempC dewpC))
-             (raw_time       (nth 2 (car (dom-by-tag m 'observation_time))))
-             (time8601       (utc_to_local (iso8601-parse  raw_time)) )
-             (raw            (nth 2 (car (dom-by-tag m 'raw_text))))
-             (wx_string      (nth 2 (car (dom-by-tag m 'wx_string))))
-             (metar_type     (nth 2 (car (dom-by-tag m 'metar_type))))
-             (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag m 'visibility_statute_mi)))))
-             (flight_category (nth 2 (car (dom-by-tag m 'flight_category))))
-             (sky_conditions (dom-by-tag m 'sky_condition))
-             (p_mbar         (nth 2 (car (dom-by-tag m 'sea_level_pressure_mb))))
-             (is_day         (and (>= (decoded-time-hour time8601) 6)
-                                  (<= (decoded-time-hour time8601) 17)))
-             (wind_block     (dom-by-tag m 'wind_speed_kt))
-             (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
-             )
-        ;; (sec min hour day mon year dow dst tz)
-        
-        (setq entry (list time8601
-                     ;(format "%s-%s" station time8601)
-                          (vector station
-                                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) )
-                                (if (string= metar_type "SPECI")
-                                    (all-the-icons-octicon "alert");;"!"
-                                  " ")
-                                (concat (wx/process_present_weather wx_string)
-                                        (process_sky_cover sky_conditions is_day))
-                                (format "%.0f°C" tempC)
-                                (format "%.0f%%"  rh)
-                                (if p_mbar (format "%4.0f mbar" (string-to-number p_mbar)) "N/A")
-                                (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
-                                flight_category
-                                (format "%2.0f SM" visibility_sm) 
-                                (format "day=%s %s " is_day raw))
-                          )
-              )
-        (add-to-list 'tabulated-list-entries entry)
-        )
-      )
+    (add-to-list 'tabulated-list-entries (wx/format_metar m)) )
+
   (tabulated-list-init-header)
   (tabulated-list-print)
   )
@@ -336,7 +342,7 @@ parses its XML and returns its DOM"
   )
 
 
-(defun wx/kill (&optional whatever) (interactive) (kill-buffer wx/buf)  )
+(defun wx/kill            (&optional whatever)  (interactive) (kill-buffer wx/buf)  )
 (defun wx/metars/show-xml (&optional whatever)  (interactive) (switch-to-buffer wx/metars/xmlbuf) )
 (defun wx/tafs/show-xml   (&optional whatever)  (interactive) (switch-to-buffer wx/tafs/xmlbuf) )
 
