@@ -155,10 +155,7 @@ parses its XML and returns its DOM"
         (dolist (w (split-string wx_string " ") result)
           (setq w_match_table (mapcar (lambda (l) (push w l)) wx/wx_to_icon_map))
           (setq result (concat result
-                               (mapconcat 'choose-icon w_match_table "" )))
-                            
- ; (when (string-match-p (regexp-quote ".?FZ.*") w)
- ; (all-the-icons-wicon "snowflake-cold"))     
+                               (mapconcat 'choose-icon w_match_table "" )))                            
           )
         )
      ""
@@ -194,7 +191,24 @@ parses its XML and returns its DOM"
    ;; (princ (format "DBG: Sky cover list %s" covers))
   )
 
+(defun wx/fake_raw_sky_condition (conds)
+  "Recreate a raw string depicting sky condition from the TAF DOM"
+  (setq result ".")
 
+  (dolist (c conds)
+    (setq cov "???")
+    (setq alt "???")
+    (dolist (attribute (car (cdr c)))
+       (progn
+         (print (car attribute ))
+         (when (string= (car attribute) "sky_cover")         (setq cov (cdr attribute)))
+         (when (string= (car attribute) "cloud_base_ft_agl") (setq alt (string-to-number (cdr attribute)))))
+       )
+     (setq result (format "%s %s%03i" result cov (/ alt 100)) ) 
+     )
+  result
+  )
+  
 
 
 
@@ -207,24 +221,26 @@ parses its XML and returns its DOM"
          (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
          (wx_string      (nth 2 (car (dom-by-tag f 'wx_string))))
          (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag f 'visibility_statute_mi)))))
+         (sky_conditions (dom-by-tag f 'sky_condition))
          (is_day         (and (>= (decoded-time-hour time8601) 6)
                               (<= (decoded-time-hour time8601) 17))) )        
     (list time8601
           (vector station
                   (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) ) 
                   "->"
-                  (wx/process_present_weather wx_string)
+                  (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions is_day))
+                 
                   "" ;; temperature
                   "" ;; humidity
                   "" ;; pressure
                   (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
                   "??VFR"
                   (format "%2.0f SM" visibility_sm) 
-                  (format "day=%s WX=%s " is_day wx_string))
+                  (format "day=%s WX=%s %s" is_day wx_string (wx/fake_raw_sky_condition sky_conditions ))
           )
     )
   )
-
+)
 
 
 (defun wx/format_metar (m)
@@ -255,8 +271,7 @@ parses its XML and returns its DOM"
                   (if (string= metar_type "SPECI")
                       (all-the-icons-octicon "alert");;"!"
                     " ")
-                  (concat (wx/process_present_weather wx_string)
-                          (process_sky_cover sky_conditions is_day))
+                  (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions is_day))
                   (format "%.0f°C" tempC)
                   (format "%.0f%%"  rh)
                   (if p_mbar (format "%4.0f mbar" (string-to-number p_mbar)) "N/A")
