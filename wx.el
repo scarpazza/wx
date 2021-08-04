@@ -10,6 +10,13 @@
 (require 'timezone)
 
 
+;; to-do
+;; - compute flight cat from taf
+;; - finish more metar wx codes
+;; - compute day from ephemerides
+
+
+;; Customization variables ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (defgroup wx nil
   "Weather observations and forecasts - retrieved from the U.S. National Weather Service."
   :prefix "wx/"
@@ -18,45 +25,87 @@
   )
 
 
-(defcustom wx/metar/metar_url_template
+(defcustom wx/metar/url_template
   "https://www.aviationweather.gov/adds/dataserver_current/httpparam?dataSource=metars&requestType=retrieve&format=xml&stationString=%s&hoursBeforeNow=%i"
   "This is the URL template to access the METAR (observed weather) service from the National Weather Service. Don't fiddle with it unless you know well what you are doing."
   :type 'string
 ;;  :require 'wx
   :group 'Weather)
 
-(defcustom wx/metar/closest_airport_to_home
-  "KJFK"
-  "This is the four-letter FAA identifier of the airport you are fetching weather observations from."
+(defcustom wx/taf/url_template
+  "https://www.aviationweather.gov/adds/dataserver_current/httpparam?dataSource=tafs&requestType=retrieve&format=xml&stationString=%s&hoursBeforeNow=%i" 
+  "This is the URL template to access the TAF (weather forecasts) from the National Weather Service. Don't fiddle with it unless you know well what you are doing."
   :type 'string
 ;;  :require 'wx
   :group 'Weather)
 
-(defcustom wx/metar/look_back_hours
-  18
-  "This is the four-letter FAA identifier of the airport you are using to determine observed weather."
+
+(defcustom wx/metar/closest_airport_to_home  "KJFK"
+  "Four-letter FAA identifier of the airport you are fetching weather observations from. This might be a smaller and closer airport than the one for which you request forecasts."
+  :type 'string
+;;  :require 'wx
+  :group 'Weather)
+
+(defcustom wx/taf/closest_airport_to_home  "KJFK"
+  "Four-letter FAA identifier of the airport you are requesting weather forecasts for. This might be a larger and further away from home airport than the one where you get observations from."
+  :type 'string
+;;  :require 'wx
+  :group 'Weather)
+
+
+(defcustom wx/metar/look_back_hours 18
+  "How many hours are you interested in looking back when requesting observed weather."
   :type 'integer
 ;;  :require 'wx
   :group 'Weather)
 
-        
-(defun wx/revert-hook () 
-  (setq url (format wx/metar/metar_url_template wx/metar/closest_airport_to_home wx/metar/look_back_hours ))
-  (message "Fetching weather from: %s" url)
-  (setq xmlbuf (url-retrieve-synchronously url))
-  (with-current-buffer xmlbuf
+(defcustom wx/taf/look_back_hours 3
+  "How many hours of weather forecasts are you requesting. We recommend you don't change this value. Usually only the last forecast is immediately useful."
+  :type 'integer
+;;  :require 'wx
+  :group 'Weather)
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(defun request_dom (url root_tag)
+  "Fetches the URL given, loads it into the buffer whose name is given,
+parses its XML and returns its DOM"
+
+  (message (format "Fetching weather forecasts from: %s" url))
+  (setq buf (url-retrieve-synchronously url))
+
+  (message (format "Populating buffer" buf))
+
+  (with-current-buffer buf
     (goto-char (point-min))
     (re-search-forward "^$")
     (delete-region (point) (point-min))
     (setq dom (libxml-parse-html-region (point-min) (point-max) ))
     )
-  (setq metars (dom-by-tag dom 'metar))
-  )
+
+   (message (format "Extracting DOM for tag %s" root_tag))
+   (message (format "Extracting DOM %s" root_tag))
+
+  
+  (cons (dom-by-tag dom root_tag) buf)
+)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(setq wx/metars nil)
+(setq wx/tafs nil)
 
 
-(switch-to-buffer xmlbuf)
+;; (message "Entire XML response %s" (buffer-string))
+;; ;; GOOD
 
-;;
+(defun utc_to_local (utc)
+   "Convert UTC calendrical time to local calendrical time"
+   (decode-time (encode-time utc) (current-time-zone)))  
+
+;; (utc_to_local (iso8601-parse  "2021-08-26T18:43:00Z"))
+
 
 (defun wx/rel_humidity (T Td)
   "Relative Humidity, computed per RH=100* (EXP((17.625*TD)/(243.04+TD))/EXP((17.625*T)/(243.04+T)))
@@ -67,18 +116,7 @@
      )
   )
 
-
-(message "Entire XML response %s" (buffer-string))
-
-
-;; GOOD
-(defun utc_to_local (utc)
-  "Convert UTC calendrical time to local calendrical time"
-  (decode-time (encode-time utc) (current-time-zone)))  
-
-(utc_to_local (iso8601-parse  "2021-08-26T18:43:00Z"))
-
-;;
+;; More weather strings at:
 ;; http://www.moratech.com/aviation/metar-class/metar-pg9-ww.html
 ;;
 (setq wx/wx_to_icon_map
@@ -110,7 +148,7 @@
     )
   )
 
-(defun process_present_weather (wx_string)
+(defun wx/process_present_weather (wx_string)
   (if wx_string
       (progn 
         (setq result "")
@@ -125,7 +163,6 @@
         )
      ""
      ))
-
 
 
 (defun process_sky_cover (conds is_day)
@@ -158,10 +195,70 @@
   )
 
 
-(defun wx/synopsis/refresh-contents (&optional async)
-  (with-output-to-temp-buffer "*Weather*"
-    (dolist (m metars)
-    ;;(print m)
+
+(defun wx/refresh-contents (&optional _arg _noconfirm)
+  ;;(wx/ensure-wx-mode)
+  (setq tabulated-list-entries '())
+
+  ;; only fetch the metars once
+  (if (not wx/metars)
+      (let* ( (url (format wx/metar/url_template wx/metar/closest_airport_to_home wx/metar/look_back_hours ))
+              (answer (request_dom url 'metar)) )
+        (progn
+          (setq wx/metars        (car answer))
+          (setq wx/metars/xmlbuf (cdr answer)) )
+        )
+    )  
+  (if (not wx/tafs)
+      (let* ( (url (format wx/taf/url_template wx/taf/closest_airport_to_home wx/taf/look_back_hours ))
+              ( answer (request_dom url 'taf))
+              )
+        (progn
+          (setq wx/tafs        (car answer))
+          (setq wx/tafs/xmlbuf (cdr answer))
+          (print wx/tafs)
+          )
+        
+        )
+    )
+
+  (setq wx/firsttaf       (car wx/tafs))
+  (print wx/firsttaf)
+            
+  (setq station           (nth 2 (car (dom-by-tag wx/firsttaf  'station_id))))
+  (setq wx/tafs/forecasts (dom-by-tag wx/firsttaf 'forecast))
+  (dolist (m wx/tafs/forecasts)
+    (let* (
+           (raw_time       (nth 2 (car (dom-by-tag m 'fcst_time_from))))
+           (time8601       (utc_to_local (iso8601-parse  raw_time)) )         
+           (wind_block     (dom-by-tag m 'wind_speed_kt))
+           (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
+           (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag m 'visibility_statute_mi)))))
+           (is_day         (and (>= (decoded-time-hour time8601) 6)
+                              (<= (decoded-time-hour time8601) 17)))
+           
+           )        
+        (setq entry (list time8601
+                     ;(format "%s-%s" station time8601)
+                          (vector station
+                                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) ) 
+                                "Fcast"
+                                "WX"
+                                "" ;; temperature
+                                "" ;; humidity
+                                "" ;; pressure
+                                (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
+                                "??VFR"
+                                (format "%2.0f SM" visibility_sm) 
+                                (format "day=%s  " is_day))
+                          )
+              )
+        (print entry)
+        (add-to-list 'tabulated-list-entries entry)
+        )
+  )
+  
+  (dolist (m wx/metars)
       (let* (
              (station        (nth 2 (car (dom-by-tag m 'station_id))))
              (tempC          (string-to-number (nth 2 (car (dom-by-tag m 'temp_c)))))
@@ -178,49 +275,47 @@
              (p_mbar         (nth 2 (car (dom-by-tag m 'sea_level_pressure_mb))))
              (is_day         (and (>= (decoded-time-hour time8601) 6)
                                   (<= (decoded-time-hour time8601) 17)))
-             (wind_speed     (string-to-number (nth 2 (car (dom-by-tag m 'wind_speed_kt)))))
+             (wind_block     (dom-by-tag m 'wind_speed_kt))
+             (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
              )
         ;; (sec min hour day mon year dow dst tz)
         
         (setq entry (list time8601
                      ;(format "%s-%s" station time8601)
                           (vector station
-                                (format "%02i:%02i" (decoded-time-hour   time8601)
-                                        (decoded-time-minute time8601)
-                                        )
+                                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) )
                                 (if (string= metar_type "SPECI")
                                     (all-the-icons-octicon "alert");;"!"
                                   " ")
-                                (concat (process_present_weather wx_string)
+                                (concat (wx/process_present_weather wx_string)
                                         (process_sky_cover sky_conditions is_day))
                                 (format "%.0f°C" tempC)
                                 (format "%.0f%%"  rh)
                                 (if p_mbar (format "%4.0f mbar" (string-to-number p_mbar)) "N/A")
-                                (format "%3.0f kts" wind_speed)
+                                (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
                                 flight_category
                                 (format "%2.0f SM" visibility_sm) 
                                 (format "day=%s %s " is_day raw))
                           )
               )
         (add-to-list 'tabulated-list-entries entry)
-      
-      ;;(process_sky_cover sky_conditions is_day)
         )
       )
-    )
+  (tabulated-list-init-header)
+  (tabulated-list-print)
   )
 
 
 
 
-(define-derived-mode wx-mode tabulated-list-mode "Weather"
+(define-derived-mode wx/mode tabulated-list-mode "Weather"
   "Weather mode"
   ;; (setq mode-line-process '((package--downloads-in-progress ":Loading")
   ;;                           (package-menu--transaction-status
   ;;                            package-menu--transaction-status)))
   (setq tabulated-list-format
         `[("Location"  8  nil)
-          ("Issued"    6  t)
+          ("Date & Time" 11  t)
           ("!"         3  t)
           ("Weather"  10  nil)
           ("Temp"      4  t)
@@ -231,30 +326,34 @@
           ("Vis'ty"    7  t)          
           ("Comments" 20 nil)])
   (setq tabulated-list-padding 2)
-  (setq tabulated-list-sort-key '("Issued" . 'from-most-recent))
-  (setq buf (get-buffer-create "*Weather*"))
-  (tabulated-list-init-header)
-  (setq revert-buffer-function 'wx/synopsis/refresh-contents)
+  (setq tabulated-list-sort-key '("Date & Time" . 'from-most-recent))
+  (setq wx/buf (get-buffer-create "*Weather*"))
+  (use-local-map wx/keymap)
+  (setq revert-buffer-function 'wx/refresh-contents)
   
   ;;(setf imenu-prev-index-position-function #'package--imenu-prev-index-position-function)
   ;;(setf imenu-extract-index-name-function #'package--imenu-extract-index-name-function)
   )
 
-(defvar wx-mode/keymap
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map "d" 'wx/observed/menu-delete)
-    (define-key map "?" #'wx/observed/menu-help)
-    map)
-  "Local keymap for `wx-mode' buffers.")
 
-(easy-menu-define wx-mode/menu wx-mode/keymap
-  "Menu for `wx-mode'."
-  '("MenuChoice1"
-    ["Menu Option 1" wx/observed/do_something  :help "Help for option 1"])
+(defun wx/kill (&optional whatever) (interactive) (kill-buffer wx/buf)  )
+(defun wx/metars/show-xml (&optional whatever)  (interactive) (switch-to-buffer wx/metars/xmlbuf) )
+(defun wx/tafs/show-xml   (&optional whatever)  (interactive) (switch-to-buffer wx/tafs/xmlbuf) )
+
+
+(defun wx/force-refresh (&optional whatever)
+  (interactive)
+  (progn
+    (message "Weather: user forced information refresh from remote server...")
+    (setq wx/metars nil)
+    (setq wx/tafs   nil)
+    (wx/refresh-contents)
+    (tabulated-list-print t))
   )
 
-(defun wx-observed (&optional no-fetch)
+(defvar wx/keymap nil "Keymap the Weather mode")
+
+(defun wx (&optional no-fetch)
   "Display weather."
   (interactive "P")
   (require 'finder-inf nil t)
@@ -268,16 +367,31 @@
   ;;          #'package-menu--mark-or-notify-upgrades 'append)
 
   (setq tabulated-list-entries '())
-  (setq buf (get-buffer-create "*Weather*"))
-  (set-buffer buf)
+  (setq wx/buf (get-buffer-create "*Weather*"))
+  (set-buffer wx/buf)
+
+  (setq wx/keymap (make-sparse-keymap))
+  (set-keymap-parent wx/keymap tabulated-list-mode-map)
+  (define-key wx/keymap (kbd "G") 'wx/observed/force-refresh)
+  (define-key wx/keymap (kbd "q") 'wx/kill)
+  (define-key wx/keymap (kbd "x") 'wx/metars/show-xml)
+  (define-key wx/keymap (kbd "X") 'wx/tafs/show-xml)
+
+  (define-key wx/keymap (kbd "1") 'delete-other-windows)
+
   (setq buffer-file-coding-system 'utf-8)
-  (wx/synopsis/refresh-contents)
-  (wx-mode)
-  (tabulated-list-print)
-  (switch-to-buffer buf)
+  (wx/refresh-contents)
+  (wx/mode)
+  ;;(tabulated-list-print)
+  (switch-to-buffer wx/buf)
   )
 
-(wx-observed)
 
 
-;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+
+(wx)
+
