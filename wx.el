@@ -11,7 +11,7 @@
 
 
 ;; to-do
-;; - compute flight cat from taf
+;; - compute and display flight category from taf
 ;; - finish more metar wx codes
 ;; - compute day from ephemerides
 
@@ -191,25 +191,75 @@ parses its XML and returns its DOM"
    ;; (princ (format "DBG: Sky cover list %s" covers))
   )
 
-(defun wx/fake_raw_sky_condition (conds)
-  "Recreate a raw string depicting sky condition from the TAF DOM"
-  (setq result ".")
+(defun process_sky_cover (conds is_day)
+  "Determine the worst-coverage layer and generate a symbol accordingly"
+  (setq covers '())
+  (dolist (c conds)
+    (dolist (layer (car (cdr c)))
+      (when (string= (car layer) "sky_cover")
+        (add-to-list 'covers (cdr layer)) ) ) )
+  ;; (princ (format "DBG: Sky cover list %s" covers))
 
+  (setq worst ;; worst sky coverage
+        (catch 'loop
+          (dolist (c '("OVC" "BKN" "SCT" "FEW" "CLR" "SKC"))
+            (when (member c covers) (throw 'loop c)))))
+
+  (if is_day
+      (cond ( (string= worst "OVC")  ( all-the-icons-wicon "cloudy"))
+            ( (string= worst "BKN")  ( all-the-icons-wicon "day-cloudy"))
+            ( (string= worst "SCT")  ( all-the-icons-wicon "day-cloudy-high"))
+            ( t                      ( all-the-icons-wicon "day-sunny"))
+            )
+    ;; else it's night
+    (cond ( (string= worst "OVC")  ( all-the-icons-wicon "cloudy"))
+          ( (string= worst "BKN")  ( all-the-icons-wicon "night-alt-cloudy"))
+          ( (string= worst "SCT")  ( all-the-icons-wicon "night-alt-partly-cloudy"))
+          ( t                      ( all-the-icons-wicon "night-clear"))
+          ) )
+   ;; (princ (format "DBG: Sky cover list %s" covers))
+  )
+
+
+
+(defun wx/fake_raw_sky_condition (conds)
+  (setq result "")
   (dolist (c conds)
     (setq cov "???")
     (setq alt "???")
     (dolist (attribute (car (cdr c)))
+      (progn        
+        (when (string= (car attribute) "sky_cover")         (setq cov (cdr attribute)))
+        (when (string= (car attribute) "cloud_base_ft_agl") (setq alt (string-to-number (cdr attribute)))))
+      )
+    (setq result (format "%s %s%03i" result cov (/ alt 100)) ) 
+    )
+  result
+  )
+
+(defun wx/determine_ceiling (conds)
+  "Recreate a raw string depicting sky condition from the TAF DOM"
+  (setq cig_coverage nil)
+  (setq cig_altitude 999999)
+
+  (dolist (c conds)
+    (dolist (attribute (car (cdr c)))
        (progn
-         (print (car attribute ))
          (when (string= (car attribute) "sky_cover")         (setq cov (cdr attribute)))
          (when (string= (car attribute) "cloud_base_ft_agl") (setq alt (string-to-number (cdr attribute)))))
        )
-     (setq result (format "%s %s%03i" result cov (/ alt 100)) ) 
-     )
-  result
+
+    (when (and (or (equal cov "OVC") (equal cov "BKN"))
+               (< alt cig_altitude))
+      (progn
+        (setq cig_coverage cov)
+        (setq cig_altitude alt)
+        )
+      )
+    )
+  (cons cig_coverage cig_altitude)
   )
   
-
 
 
 (defun wx/format_taf_forecast (f station)
@@ -222,6 +272,9 @@ parses its XML and returns its DOM"
          (wx_string      (nth 2 (car (dom-by-tag f 'wx_string))))
          (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag f 'visibility_statute_mi)))))
          (sky_conditions (dom-by-tag f 'sky_condition))
+         (ceiling_pair   (wx/determine_ceiling sky_conditions))
+         (cig_coverage   (car ceiling_pair))
+         (cig_altitude   (cdr ceiling_pair))         
          (is_day         (and (>= (decoded-time-hour time8601) 6)
                               (<= (decoded-time-hour time8601) 17))) )        
     (list time8601
@@ -235,12 +288,16 @@ parses its XML and returns its DOM"
                   "" ;; pressure
                   (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
                   "??VFR"
-                  (format "%2.0f SM" visibility_sm) 
-                  (format "day=%s WX=%s %s" is_day wx_string (wx/fake_raw_sky_condition sky_conditions ))
+                  (format "%2.0f SM" visibility_sm)
+                  (if cig_coverage (format "%s %4.1fk ft" cig_coverage (/ cig_altitude 1000.0)) "None" )
+                  (format "day=%s %s %s" is_day wx_string (wx/fake_raw_sky_condition sky_conditions ))
           )
     )
   )
 )
+
+
+
 
 
 (defun wx/format_metar (m)
@@ -263,9 +320,15 @@ parses its XML and returns its DOM"
                                   (<= (decoded-time-hour time8601) 17)))
          (wind_block     (dom-by-tag m 'wind_speed_kt))
          (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
+         (ceiling_pair   (wx/determine_ceiling sky_conditions))
+         (cig_coverage   (car ceiling_pair))
+         (cig_altitude   (cdr ceiling_pair))
          )
-        
-    (list time8601
+    (progn
+      (print "xxx")
+      (print ceiling_pair)
+    
+      (list time8601
           (vector station
                   (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) )
                   (if (string= metar_type "SPECI")
@@ -277,9 +340,11 @@ parses its XML and returns its DOM"
                   (if p_mbar (format "%4.0f mbar" (string-to-number p_mbar)) "N/A")
                   (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
                   flight_category
-                  (format "%2.0f SM" visibility_sm) 
+                  (format "%2.0f SM" visibility_sm)
+                  (if cig_coverage (format "%s %4.1fk ft" cig_coverage (/ cig_altitude 1000.0)) "None" )
                   (format "day=%s %s " is_day raw))
           )
+    )
     )
   )
 
@@ -345,6 +410,7 @@ parses its XML and returns its DOM"
           ("Wind"      9  t)
           ("Flight"    6  t)
           ("Vis'ty"    7  t)          
+          ("Ceiling"  15  t)          
           ("Comments" 20 nil)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Date & Time" . 'from-most-recent))
