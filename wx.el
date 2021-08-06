@@ -8,6 +8,7 @@
 (require 'all-the-icons)
 (require 'iso8601)
 (require 'timezone)
+(require 'solar)
 
 
 ;; to-do
@@ -22,6 +23,7 @@
   :group 'Weather
   :link "http://www.github.com/scarpazza/wx"
   )
+
 
 
 (defcustom wx/metar/url_template
@@ -58,7 +60,7 @@
 ;;  :require 'wx
   :group 'Weather)
 
-(defcustom wx/taf/look_back_hours 3
+(defcustom wx/taf/look_back_hours 2
   "How many hours of weather forecasts are you requesting. We recommend you don't change this value. Usually only the last forecast is immediately useful."
   :type 'integer
 ;;  :require 'wx
@@ -96,9 +98,6 @@ parses its XML and returns its DOM"
 (setq wx/tafs nil)
 
 
-;; (message "Entire XML response %s" (buffer-string))
-;; ;; GOOD
-
 (defun utc_to_local (utc)
    "Convert UTC calendrical time to local calendrical time"
    (decode-time (encode-time utc) (current-time-zone)))  
@@ -128,7 +127,8 @@ parses its XML and returns its DOM"
        '( "sprinkle"     ("-RA" "-DZ" "DZ" "+DZ" ) )
        '( "sleet"        ("FZRA" "FZDZ" "RASN") )
        '( "smoke"        ("FU") )
-       '( "dust"         ("DS""PO" "DU" "VA" "SS" "BLDU" "BLSA") )
+       '( "dust"         ("DS" "PO" "DU" "SS" "BLDU" "BLSA") )
+       '( "volcano"      ("VA") )
        '( "hail"         ("GS" "GR" "SP") )
        '( "snow"         ("SN"  "PL"  "SG") )
        '( "snow-wind"    ("BLSN") )
@@ -228,20 +228,31 @@ parses its XML and returns its DOM"
     )
   (cons cig_coverage cig_altitude)
   )
-  
+
+(defun wx/colorize_flight_category (name)
+  (propertize name 'font-lock-face
+              (if     (equal name "LIFR")  '(:foreground "magenta")
+                (if   (equal name "IFR")   '(:foreground "red")
+                  (if (equal name "MVFR")  '(:foreground "blue")
+                    '(:foreground "green"))))))
+
+
 (defun wx/determine_flight_category (vis_sm ceiling_ft)
-  (if     (or (< vis_sm 1) (< ceiling_ft 500))  "LIFR"
-    (if   (or (< vis_sm 3) (< ceiling_ft 1000)) "IFR"
-      (if (or (< vis_sm 5) (< ceiling_ft 3000)) "MVFR"
-        "VFR"
-        ))))
+  (wx/colorize_flight_category
+   (if     (or (< vis_sm 1) (< ceiling_ft 500))   "LIFR" 
+     (if   (or (< vis_sm 3) (< ceiling_ft 1000))  "IFR"  
+       (if (or (< vis_sm 5) (< ceiling_ft 3000))  "MVFR" 
+          "VFR" 
+      )))))
 
 
-(defun wx/format_taf_forecast (f station)
+(defun wx/format_taf_forecast (f station sunrise_t sunset_t)
   "Returns a tabulated entry representing one TAF forecast"
   (let* (
-         (raw_time       (nth 2 (car (dom-by-tag f 'fcst_time_from))))
-         (time8601       (utc_to_local (iso8601-parse  raw_time)) )         
+         (raw_time_from  (nth 2 (car (dom-by-tag f 'fcst_time_from))))
+         (raw_time_to    (nth 2 (car (dom-by-tag f 'fcst_time_to))))
+         (from_time8601  (utc_to_local (iso8601-parse  raw_time_from)) )         
+         (to_time8601    (utc_to_local (iso8601-parse  raw_time_to)) )         
          (wind_block     (dom-by-tag f 'wind_speed_kt))
          (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
          (wx_string      (nth 2 (car (dom-by-tag f 'wx_string))))
@@ -250,14 +261,16 @@ parses its XML and returns its DOM"
          (ceiling_pair   (wx/determine_ceiling sky_conditions))
          (cig_coverage   (car ceiling_pair))
          (cig_altitude   (cdr ceiling_pair))         
-         (is_day         (and (>= (decoded-time-hour time8601) 6)
-                              (<= (decoded-time-hour time8601) 17))) )        
-    (list time8601
+         (is_day         (and (>= (decoded-time-hour from_time8601) 6)
+                              (<= (decoded-time-hour from_time8601) 17))) )        
+    (list from_time8601
           (vector station
-                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) ) 
-                  "->"
-                  (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions is_day))
-                 
+                  (format "%02i/%02i %02i:%02i%s%02i:%02i" (decoded-time-month   from_time8601) (decoded-time-day   from_time8601)
+                          (decoded-time-hour   from_time8601) (decoded-time-minute from_time8601)
+                          (all-the-icons-octicon "arrow-right")
+                          (decoded-time-hour   to_time8601) (decoded-time-minute to_time8601) ) 
+                  "F"
+                  (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions (wx/is_day from_time8601 sunrise_t sunset_t)))                 
                   "" ;; temperature
                   "" ;; humidity
                   "" ;; pressure
@@ -265,17 +278,20 @@ parses its XML and returns its DOM"
                   (wx/determine_flight_category visibility_sm (if cig_altitude cig_altitude 10000))
                   (format "%2.0f SM" visibility_sm)
                   (if cig_coverage (format "%s %4.1fk ft" cig_coverage (/ cig_altitude 1000.0)) "None" )
-                  (format "day=%s %s %s" is_day wx_string (wx/fake_raw_sky_condition sky_conditions ))
+                  (format "Forecast %s %s" wx_string (wx/fake_raw_sky_condition sky_conditions ))
           )
     )
   )
 )
 
 
+(defun wx/is_day (time8601 sunrise_t sunset_t)
+  (let ((now (+ (decoded-time-hour time8601) (/ (decoded-time-minute time8601) 60.0))))
+    (and (>= now sunrise_t) (<= now sunset_t))
+    )
+  )
 
-
-
-(defun wx/format_metar (m)
+(defun wx/format_metar (m sunrise_t sunset_t)
   "Returns a tabulated entry representing one METAR observation"
   (let* (
          (station        (nth 2 (car (dom-by-tag m 'station_id))))
@@ -291,37 +307,33 @@ parses its XML and returns its DOM"
          (flight_category (nth 2 (car (dom-by-tag m 'flight_category))))
          (sky_conditions (dom-by-tag m 'sky_condition))
          (p_mbar         (nth 2 (car (dom-by-tag m 'sea_level_pressure_mb))))
-         (is_day         (and (>= (decoded-time-hour time8601) 6)
-                                  (<= (decoded-time-hour time8601) 17)))
          (wind_block     (dom-by-tag m 'wind_speed_kt))
          (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
          (ceiling_pair   (wx/determine_ceiling sky_conditions))
          (cig_coverage   (car ceiling_pair))
          (cig_altitude   (cdr ceiling_pair))
          )
-    (progn
-      (print "xxx")
-      (print ceiling_pair)
-    
       (list time8601
           (vector station
-                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601) (decoded-time-hour   time8601) (decoded-time-minute time8601) )
+                  (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601)
+                          (decoded-time-hour   time8601) (decoded-time-minute time8601) )
                   (if (string= metar_type "SPECI")
                       (all-the-icons-octicon "alert");;"!"
                     " ")
-                  (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions is_day))
+                  (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions (wx/is_day time8601 sunrise_t sunset_t)))
                   (format "%.0f°C" tempC)
                   (format "%.0f%%"  rh)
                   (if p_mbar (format "%4.0f mbar" (string-to-number p_mbar)) "N/A")
                   (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
-                  flight_category
+                  (wx/colorize_flight_category flight_category)
                   (format "%2.0f SM" visibility_sm)
                   (if cig_coverage (format "%s %4.1fk ft" cig_coverage (/ cig_altitude 1000.0)) "None" )
-                  (format "day=%s %s " is_day raw))
+                  (format "%s" raw)
           )
     )
-    )
+      )
   )
+
 
 
 
@@ -351,16 +363,39 @@ parses its XML and returns its DOM"
         )
     )
 
-  (setq wx/firsttaf       (car wx/tafs))
-  (print wx/firsttaf)
-            
-  (setq station           (nth 2 (car (dom-by-tag wx/firsttaf  'station_id))))
+  (setq wx/firsttaf        (car wx/tafs))            
+  (setq station            (nth 2 (car (dom-by-tag wx/firsttaf  'station_id))))
+  (setq now                (decode-time (current-time)))
+  (setq calendar-latitude  (string-to-number (nth 2 (car (dom-by-tag wx/firsttaf  'latitude)))))
+  (setq calendar-longitude (string-to-number (nth 2 (car (dom-by-tag wx/firsttaf  'longitude)))))
+  (setq calendar-time-zone  (/ (car (current-time-zone)) 60))
+  (setq sss (solar-sunrise-sunset (calendar-current-date)))
+  (setq sunrise_t (nth 0 (nth 0 sss)))
+  (setq sunset_t  (nth 0 (nth 1 sss)))
+  (setq sunrise_h   (truncate sunrise_t))
+  (setq sunrise_min (round (* 60 (- sunrise_t sunrise_h))))
+  (setq sunset_h    (truncate sunset_t))
+  (setq sunset_min  (round (* 60 (- sunset_t sunset_h))))
+
+  (add-to-list 'tabulated-list-entries
+               (list "Sunset"
+                     (vector station
+                             (format "%02i/%02i %02i:%02i" (decoded-time-month now) (decoded-time-day now) sunset_h sunset_min)
+                             (all-the-icons-wicon "sunset")
+                             "" "" "" "" "" "" "" "" "Sunset") ) )
+  (add-to-list 'tabulated-list-entries
+               (list "Sunrise"
+                     (vector station
+                             (format "%02i/%02i %02i:%02i" (decoded-time-month now) (decoded-time-day now) sunrise_h sunrise_min)
+                             (all-the-icons-wicon "sunrise")
+                             "" "" "" "" "" "" "" "" "Sunrise") ) )
+    
   (setq wx/tafs/forecasts (dom-by-tag wx/firsttaf 'forecast))
   (dolist (f wx/tafs/forecasts)
-    (add-to-list 'tabulated-list-entries (wx/format_taf_forecast f station) ) )
+    (add-to-list 'tabulated-list-entries (wx/format_taf_forecast f station sunrise_t sunset_t) ) )
   
   (dolist (m wx/metars)
-    (add-to-list 'tabulated-list-entries (wx/format_metar m)) )
+    (add-to-list 'tabulated-list-entries (wx/format_metar m sunrise_t sunset_t)) )
 
   (tabulated-list-init-header)
   (tabulated-list-print)
@@ -376,7 +411,7 @@ parses its XML and returns its DOM"
   ;;                            package-menu--transaction-status)))
   (setq tabulated-list-format
         `[("Location"  8  nil)
-          ("Date & Time" 11  t)
+          ("Date & Time" 17  t)
           ("!"         3  t)
           ("Weather"  10  nil)
           ("Temp"      4  t)
@@ -434,7 +469,7 @@ parses its XML and returns its DOM"
 
   (setq wx/keymap (make-sparse-keymap))
   (set-keymap-parent wx/keymap tabulated-list-mode-map)
-  (define-key wx/keymap (kbd "G") 'wx/observed/force-refresh)
+  (define-key wx/keymap (kbd "G") 'wx/force-refresh)
   (define-key wx/keymap (kbd "q") 'wx/kill)
   (define-key wx/keymap (kbd "x") 'wx/metars/show-xml)
   (define-key wx/keymap (kbd "X") 'wx/tafs/show-xml)
