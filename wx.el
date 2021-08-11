@@ -13,8 +13,8 @@
 
 ;; to-do
 ;; - finish more metar wx codes
-;; - compute day/night from ephemerides
-
+;; done
+;; computes day and night from ephemeres
 
 ;; Customization variables ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (defgroup wx nil
@@ -30,43 +30,65 @@
   "https://www.aviationweather.gov/adds/dataserver_current/httpparam?dataSource=metars&requestType=retrieve&format=xml&stationString=%s&hoursBeforeNow=%i"
   "This is the URL template to access the METAR (observed weather) service from the National Weather Service. Don't fiddle with it unless you know well what you are doing."
   :type 'string
-;;  :require 'wx
+  :require 'wx
   :group 'Weather)
 
 (defcustom wx/taf/url_template
   "https://www.aviationweather.gov/adds/dataserver_current/httpparam?dataSource=tafs&requestType=retrieve&format=xml&stationString=%s&hoursBeforeNow=%i" 
   "This is the URL template to access the TAF (weather forecasts) from the National Weather Service. Don't fiddle with it unless you know well what you are doing."
   :type 'string
-;;  :require 'wx
+  :require 'wx
   :group 'Weather)
+
+
+(defcustom wx/nearby/url_template
+  "https://www.aviationweather.gov/adds/dataserver_current/httpparam?dataSource=stations&requestType=retrieve&format=xml&radialDistance=%i;%.2f,%.2f"
+  "This is the URL template to query the National Weather Service for the closest weather stations to a given longitude/latitude. Don't fiddle with it unless you know well what you are doing."
+  :type 'string
+  :require 'wx
+  :group 'Weather
+  )
+
 
 
 (defcustom wx/metar/closest_airport_to_home  "KJFK"
   "Four-letter FAA identifier of the airport you are fetching weather observations from. This might be a smaller and closer airport than the one for which you request forecasts."
   :type 'string
-;;  :require 'wx
+  :require 'wx
   :group 'Weather)
 
 (defcustom wx/taf/closest_airport_to_home  "KJFK"
   "Four-letter FAA identifier of the airport you are requesting weather forecasts for. This might be a larger and further away from home airport than the one where you get observations from."
   :type 'string
-;;  :require 'wx
+  :require 'wx
   :group 'Weather)
 
 
 (defcustom wx/metar/look_back_hours 18
   "How many hours are you interested in looking back when requesting observed weather."
   :type 'integer
-;;  :require 'wx
+  :require 'wx
   :group 'Weather)
 
 (defcustom wx/taf/look_back_hours 2
   "How many hours of weather forecasts are you requesting. We recommend you don't change this value. Usually only the last forecast is immediately useful."
   :type 'integer
-;;  :require 'wx
+  :require 'wx
+  :group 'Weather)
+
+(defcustom wx/nearby/radial_distance 35
+  "How far away from your current position we are considering weather stations. Increase this value if you live in a sparse area and don't have many airports around you."
+  :type 'integer
+  :require 'wx
   :group 'Weather)
 
 
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(setq wx/metars nil)
+(setq wx/tafs nil)
+(setq wx/nearby/data nil)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (defun request_dom (url root_tag)
@@ -87,15 +109,12 @@ parses its XML and returns its DOM"
 
    (message (format "Extracting DOM for tag %s" root_tag))
    (message (format "Extracting DOM %s" root_tag))
-
   
   (cons (dom-by-tag dom root_tag) buf)
 )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(setq wx/metars nil)
-(setq wx/tafs nil)
 
 
 (defun utc_to_local (utc)
@@ -133,7 +152,7 @@ parses its XML and returns its DOM"
        '( "snow"         ("SN"  "PL"  "SG") )
        '( "snow-wind"    ("BLSN") )
        '( "showers"      ("RA" "+RA" "VCSH" "SHRA") )
-       '( "thunderstorm"          ("VCTS" "TSRA") )
+       '( "thunderstorm"          ("VCTS" "TSRA" "TSGS") )
        '( "day-snow-thunderstorm" ("TSSN" "TSSNGS") )
        )
       )
@@ -238,31 +257,37 @@ parses its XML and returns its DOM"
 
 
 (defun wx/determine_flight_category (vis_sm ceiling_ft)
-  (wx/colorize_flight_category
-   (if     (or (< vis_sm 1) (< ceiling_ft 500))   "LIFR" 
-     (if   (or (< vis_sm 3) (< ceiling_ft 1000))  "IFR"  
-       (if (or (< vis_sm 5) (< ceiling_ft 3000))  "MVFR" 
-          "VFR" 
-      )))))
+  (if (> vis_sm 0)
+      (wx/colorize_flight_category
+       (if     (or (< vis_sm 1) (< ceiling_ft 500))   "LIFR" 
+         (if   (or (< vis_sm 3) (< ceiling_ft 1000))  "IFR"  
+           (if (or (< vis_sm 5) (< ceiling_ft 3000))  "MVFR" 
+             "VFR" 
+             ))))
+    "-"
+    )
+  )
 
 
-(defun wx/format_taf_forecast (f station sunrise_t sunset_t)
+(defun wx/taf/format_forecast (f station sunrise_t sunset_t)
   "Returns a tabulated entry representing one TAF forecast"
   (let* (
-         (raw_time_from  (nth 2 (car (dom-by-tag f 'fcst_time_from))))
-         (raw_time_to    (nth 2 (car (dom-by-tag f 'fcst_time_to))))
-         (from_time8601  (utc_to_local (iso8601-parse  raw_time_from)) )         
-         (to_time8601    (utc_to_local (iso8601-parse  raw_time_to)) )         
-         (wind_block     (dom-by-tag f 'wind_speed_kt))
-         (wind_speed     (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
-         (wx_string      (nth 2 (car (dom-by-tag f 'wx_string))))
-         (visibility_sm  (string-to-number (nth 2 (car (dom-by-tag f 'visibility_statute_mi)))))
+         (raw_time_from    (nth 2 (car (dom-by-tag f 'fcst_time_from))))
+         (raw_time_to      (nth 2 (car (dom-by-tag f 'fcst_time_to))))
+         (from_time8601    (utc_to_local (iso8601-parse  raw_time_from)) )         
+         (to_time8601      (utc_to_local (iso8601-parse  raw_time_to)) )         
+         (wind_block       (dom-by-tag f 'wind_speed_kt))
+         (wind_speed       (if wind_block (string-to-number (nth 2 (car wind_block))) -1))
+         (wx_string        (nth 2 (car (dom-by-tag f 'wx_string))))
+         (change_indicator (nth 2 (car (dom-by-tag f 'change_indicator))))
+         (visibility_str (nth 2 (car (dom-by-tag f 'visibility_statute_mi))))
+         (visibility_sm  (if visibility_str (string-to-number visibility_str) -1))
          (sky_conditions (dom-by-tag f 'sky_condition))
          (ceiling_pair   (wx/determine_ceiling sky_conditions))
          (cig_coverage   (car ceiling_pair))
          (cig_altitude   (cdr ceiling_pair))         
          (is_day         (and (>= (decoded-time-hour from_time8601) 6)
-                              (<= (decoded-time-hour from_time8601) 17))) )        
+                              (<= (decoded-time-hour from_time8601) 17))) )
     (list from_time8601
           (vector station
                   (format "%02i/%02i %02i:%02i%s%02i:%02i" (decoded-time-month   from_time8601) (decoded-time-day   from_time8601)
@@ -270,15 +295,15 @@ parses its XML and returns its DOM"
                           (all-the-icons-octicon "arrow-right")
                           (decoded-time-hour   to_time8601) (decoded-time-minute to_time8601) ) 
                   "F"
-                  (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions (wx/is_day from_time8601 sunrise_t sunset_t)))                 
+                  (propertize (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions (wx/is_day from_time8601 sunrise_t sunset_t)))) 
                   "" ;; temperature
                   "" ;; humidity
                   "" ;; pressure
-                  (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
+                  (if (< wind_speed 0) "N/A" (format "%3.0f %s" wind_speed  (propertize "kts" 'font-lock-face '(:height 0.7))))
                   (wx/determine_flight_category visibility_sm (if cig_altitude cig_altitude 10000))
-                  (format "%2.0f SM" visibility_sm)
+                  (if (> visibility_sm 0) (format "%2.0f SM" visibility_sm) "N/A")
                   (if cig_coverage (format "%s %4.1fk ft" cig_coverage (/ cig_altitude 1000.0)) "None" )
-                  (format "Forecast %s %s" wx_string (wx/fake_raw_sky_condition sky_conditions ))
+                  (format "Forecast %s %s" change_indicator wx_string (wx/fake_raw_sky_condition sky_conditions ))
           )
     )
   )
@@ -291,7 +316,7 @@ parses its XML and returns its DOM"
     )
   )
 
-(defun wx/format_metar (m sunrise_t sunset_t)
+(defun wx/metar/format (m sunrise_t sunset_t)
   "Returns a tabulated entry representing one METAR observation"
   (let* (
          (station        (nth 2 (car (dom-by-tag m 'station_id))))
@@ -318,22 +343,26 @@ parses its XML and returns its DOM"
                   (format "%02i/%02i %02i:%02i" (decoded-time-month   time8601) (decoded-time-day   time8601)
                           (decoded-time-hour   time8601) (decoded-time-minute time8601) )
                   (if (string= metar_type "SPECI")
-                      (all-the-icons-octicon "alert");;"!"
+                      (all-the-icons-octicon "alert")
                     " ")
                   (concat (wx/process_present_weather wx_string) (process_sky_cover sky_conditions (wx/is_day time8601 sunrise_t sunset_t)))
                   (format "%.0f°C" tempC)
                   (format "%.0f%%"  rh)
-                  (if p_mbar (format "%4.0f mbar" (string-to-number p_mbar)) "N/A")
-                  (if (< wind_speed 0) "N/A" (format "%3.0f kts" wind_speed))
+                  (if p_mbar (format "%4.0f %s" (string-to-number p_mbar)
+                                     (propertize "mbar" 'font-lock-face '(:height 0.7)) ) "")
+                  (if (< wind_speed 0) "N/A" (format "%3.0f %s" wind_speed
+                                                     (propertize "kts" 'font-lock-face '(:height 0.7))))
                   (wx/colorize_flight_category flight_category)
                   (format "%2.0f SM" visibility_sm)
                   (if cig_coverage (format "%s %4.1fk ft" cig_coverage (/ cig_altitude 1000.0)) "None" )
                   (format "%s" raw)
           )
-    )
-      )
+    ) )
   )
 
+
+(defun wx/propertize-icon (icon)
+  (add-face-text-property   0 (length icon)   :inherit t icon)  icon)
 
 
 
@@ -357,7 +386,6 @@ parses its XML and returns its DOM"
         (progn
           (setq wx/tafs        (car answer))
           (setq wx/tafs/xmlbuf (cdr answer))
-          (print wx/tafs)
           )
         
         )
@@ -381,21 +409,25 @@ parses its XML and returns its DOM"
                (list "Sunset"
                      (vector station
                              (format "%02i/%02i %02i:%02i" (decoded-time-month now) (decoded-time-day now) sunset_h sunset_min)
-                             (all-the-icons-wicon "sunset")
-                             "" "" "" "" "" "" "" "" "Sunset") ) )
+
+                             (wx/propertize-icon (all-the-icons-wicon "sunset" :face 'all-the-icons-orange ))
+                             "" "" "" "" "" "" "" ""
+                             (propertize "Sunset" 'font-lock-face '(:foreground "orange"))
+                             ) ) )
   (add-to-list 'tabulated-list-entries
                (list "Sunrise"
                      (vector station
                              (format "%02i/%02i %02i:%02i" (decoded-time-month now) (decoded-time-day now) sunrise_h sunrise_min)
-                             (all-the-icons-wicon "sunrise")
-                             "" "" "" "" "" "" "" "" "Sunrise") ) )
+                             (wx/propertize-icon (all-the-icons-wicon "sunrise" :face 'all-the-icons-yellow ))
+                             "" "" "" "" "" "" "" ""
+                             (propertize "Sunrise" 'font-lock-face '(:foreground "yellow")))) ) 
     
   (setq wx/tafs/forecasts (dom-by-tag wx/firsttaf 'forecast))
   (dolist (f wx/tafs/forecasts)
-    (add-to-list 'tabulated-list-entries (wx/format_taf_forecast f station sunrise_t sunset_t) ) )
+    (add-to-list 'tabulated-list-entries (wx/taf/format_forecast f station sunrise_t sunset_t) ) )
   
   (dolist (m wx/metars)
-    (add-to-list 'tabulated-list-entries (wx/format_metar m sunrise_t sunset_t)) )
+    (add-to-list 'tabulated-list-entries (wx/metar/format m sunrise_t sunset_t)) )
 
   (tabulated-list-init-header)
   (tabulated-list-print)
@@ -479,11 +511,122 @@ parses its XML and returns its DOM"
   (setq buffer-file-coding-system 'utf-8)
   (wx/refresh-contents)
   (wx/mode)
-  ;;(tabulated-list-print)
   (switch-to-buffer wx/buf)
   )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(wx)
+;;(wx)
+
+
+
+(define-derived-mode wx/nearby/mode tabulated-list-mode "Weather/Nearby"
+  "Weather mode"
+  ;; (setq mode-line-process '((package--downloads-in-progress ":Loading")
+  ;;                           (package-menu--transaction-status
+  ;;                            package-menu--transaction-status)))
+  (setq tabulated-list-format
+        `[("Identifier"  11  t)
+          ("WMO ID"       6  t)
+          ("Latitude"    10  t)
+          ("Longitude"   10  t)
+          ("Elevation"   10  t)
+          ("Site"        30  t)
+          ("State"        6  t)
+          ("Country"      7  t)
+          ("METAR"        5  t)
+          ("TAF"          5  t)          
+          ("Comments"    20 7)])
+  (setq tabulated-list-padding 2)
+  (setq tabulated-list-sort-key '("Identifier" . 'from-most-recent))
+  (setq wx/nearby/buf (get-buffer-create "*Weather / Nearby*"))
+  (use-local-map wx/keymap)
+  (setq revert-buffer-function 'wx/nearby/refresh-contents)  
+  )
+
+(defun read-lines (filePath)
+  "Return a list of lines of a file at filePath."
+  (with-temp-buffer
+    (insert-file-contents filePath)
+    (split-string (buffer-string) "\n" t)))
+
+
+(defun wx/nearby/refresh-contents (&optional _arg _noconfirm)
+  ;;(wx/ensure-wx-mode)
+  (setq tabulated-list-entries '())
+  
+  (dolist (s (dom-by-tag  (nth 0 wx/nearby/data) 'station))
+    (add-to-list 'tabulated-list-entries (wx/nearby/format_station s) )
+    )
+  (tabulated-list-init-header)
+  (tabulated-list-print)
+  )
+
+
+
+(defun wx/nearby/format_station (d)
+  "Returns a tabulated entry representing one nearby weather station"
+  
+  (let* (
+         (station_id     (nth 2 (car (dom-by-tag d 'station_id))))
+         (wmo_id         ( if (dom-by-tag d 'wmo_id)
+                             (nth 2 (car (dom-by-tag d 'wmo_id)))
+                           "-" ))
+         (station_lat    (string-to-number (nth 2 (car (dom-by-tag d 'latitude)))))
+         (station_lon    (string-to-number (nth 2 (car (dom-by-tag d 'longitude)))))
+         (elevation_ft   (* 3.28084 (string-to-number (nth 2 (car (dom-by-tag d 'elevation_m))))))
+         (site_name      (nth 2 (car (dom-by-tag d 'site))))
+         (state          (nth 2 (car (dom-by-tag d 'state))))
+         (country        (nth 2 (car (dom-by-tag d 'country))))
+         )    
+    (list station_id
+          (vector station_id wmo_id
+                  (format "%.2f" station_lat)
+                  (format "%.2f" station_lon)
+                  (format "%7.0f ft"  elevation_ft)
+                  site_name state country "to-do" "to-do" "to-do")
+          )
+      )
+  )
+
+
+
+(defun wx-lookup-zip (&optional no-fetch)
+  "Look up the closest weather station to your zip."
+  (interactive "P")
+
+  (if (not wx/nearby/data)
+    (progn 
+      (setq zipcode (read-from-minibuffer "Enter your zipcode: "))
+      (message (format "user specified zipcode: %s" zipcode) )
+      (setq ziptable   (read-lines "~/development/wx/zip-codes.csv"))
+      (setq zip_entry  (split-string (seq-find (lambda (x) (string-prefix-p zipcode x)) ziptable) "," ))
+      (setq latitude   (string-to-number (nth 1 zip_entry)))
+      (setq longitude  (string-to-number (nth 2 zip_entry)))
+      (setq url (format wx/nearby/url_template wx/nearby/radial_distance longitude latitude ))
+      (setq wx/nearby/data (request_dom url 'data))
+      ))
+
+ ;(switch-to-buffer buf)
+  (setq tabulated-list-entries '())
+  (setq wx/nearby/buf (get-buffer-create "*Weather / Nearby*"))
+  (set-buffer wx/nearby/buf)
+  (setq wx/keymap (make-sparse-keymap))
+  (set-keymap-parent wx/keymap tabulated-list-mode-map)
+  (define-key wx/keymap (kbd "1") 'delete-other-windows)
+  (setq buffer-file-coding-system 'utf-8)
+  (wx/nearby/refresh-contents)
+  (wx/nearby/mode)
+  (print tabulated-list-entries)
+  (switch-to-buffer wx/nearby/buf)
+  )
+
+
+(setq wx/nearby/data nil)
+(wx-lookup-zip)
+
+
+
+
+
 
