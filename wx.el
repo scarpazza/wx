@@ -90,6 +90,9 @@
 (setq wx/tafs nil)
 (setq wx/nearby/data nil)
 
+(defvar wx/home_lon)
+(defvar wx/home_lat)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (defun request_dom (url root_tag)
   "Fetches the URL given, loads it into the buffer whose name is given,
@@ -527,6 +530,7 @@ parses its XML and returns its DOM"
   ;;                            package-menu--transaction-status)))
   (setq tabulated-list-format
         `[("Identifier"  11  t)
+          ("Distance"     9  t)
           ("WMO ID"       6  t)
           ("Latitude"    10  t)
           ("Longitude"   10  t)
@@ -538,7 +542,7 @@ parses its XML and returns its DOM"
           ("TAF"          5  t)          
           ("Comments"    20 7)])
   (setq tabulated-list-padding 2)
-  (setq tabulated-list-sort-key '("Identifier" . 'from-most-recent))
+  (setq tabulated-list-sort-key '("Distance" . nil))
   (setq wx/nearby/buf (get-buffer-create "*Weather / Nearby*"))
   (use-local-map wx/keymap)
   (setq revert-buffer-function 'wx/nearby/refresh-contents)  
@@ -564,9 +568,26 @@ parses its XML and returns its DOM"
 
 
 
+(defun wx/haversine_distance_nm (lat1 lon1 lat2 lon2)
+  (let* ( ( R      3440.1 )
+          ( pi_180 (/ float-pi 180.0 ))
+          ( φ1     (* lat1 pi_180 ))
+          ( φ2     (* lat2 pi_180 ))
+          ( Δφ     (* (- lat2 lat1) pi_180 ))
+          ( Δλ     (* (- lon2 lon1) pi_180 ))
+          ( a      (+ (expt (sin (/ Δφ 2)) 2)
+                      (* (cos φ1) (cos φ2) (expt (sin (/ Δλ 2)) 2))) )
+          ( c      (* 2 (atan (/ (sqrt a) (sqrt (- 1 a))))))
+          ( d      (* R c))
+          )
+    d
+    )
+  )
+
+
+
 (defun wx/nearby/format_station (d)
   "Returns a tabulated entry representing one nearby weather station"
-  
   (let* (
          (station_id     (nth 2 (car (dom-by-tag d 'station_id))))
          (wmo_id         ( if (dom-by-tag d 'wmo_id)
@@ -574,13 +595,16 @@ parses its XML and returns its DOM"
                            "-" ))
          (station_lat    (string-to-number (nth 2 (car (dom-by-tag d 'latitude)))))
          (station_lon    (string-to-number (nth 2 (car (dom-by-tag d 'longitude)))))
+         (distance_nm    (wx/haversine_distance_nm station_lat station_lon home_lat home_lon))
          (elevation_ft   (* 3.28084 (string-to-number (nth 2 (car (dom-by-tag d 'elevation_m))))))
          (site_name      (nth 2 (car (dom-by-tag d 'site))))
          (state          (nth 2 (car (dom-by-tag d 'state))))
          (country        (nth 2 (car (dom-by-tag d 'country))))
          )    
     (list station_id
-          (vector station_id wmo_id
+          (vector station_id
+                  (format "%.2f NM" distance_nm)
+                  wmo_id
                   (format "%.2f" station_lat)
                   (format "%.2f" station_lon)
                   (format "%7.0f ft"  elevation_ft)
@@ -601,9 +625,9 @@ parses its XML and returns its DOM"
       (message (format "user specified zipcode: %s" zipcode) )
       (setq ziptable   (read-lines "~/development/wx/zip-codes.csv"))
       (setq zip_entry  (split-string (seq-find (lambda (x) (string-prefix-p zipcode x)) ziptable) "," ))
-      (setq latitude   (string-to-number (nth 1 zip_entry)))
-      (setq longitude  (string-to-number (nth 2 zip_entry)))
-      (setq url (format wx/nearby/url_template wx/nearby/radial_distance longitude latitude ))
+      (setq home_lat   (string-to-number (nth 1 zip_entry)))
+      (setq home_lon   (string-to-number (nth 2 zip_entry)))
+      (setq url (format wx/nearby/url_template wx/nearby/radial_distance home_lon home_lat ))
       (setq wx/nearby/data (request_dom url 'data))
       ))
 
